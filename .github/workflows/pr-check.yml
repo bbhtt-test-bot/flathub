@@ -1,0 +1,84 @@
+name: Check PRs
+
+# WARNING: Do NOT use org level secrets or checkout any code in this workflow
+
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize]
+    branches:
+      - new-pr
+  workflow_dispatch:
+
+concurrency:
+  group: pr-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  check-pr-tasks:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Fetch PR metadata
+        id: fetch_pr
+        run: |
+          json=$(gh pr view "$PR_NUM" --json body,title -q '{body: .body, title: .title}')
+          body=$(echo "$json" | jq -r .body)
+          title=$(echo "$json" | jq -r .title)
+
+          echo "body<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$body" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+          echo "title=$title" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+
+      - name: Check PR title
+        run: |
+          if ! printf "%s" "$PR_TITLE" | grep -qE '^Add'; then
+            echo "PR title does not start with 'Add'. Marking as blocked."
+
+            gh pr edit "$PR_NUM" --add-label "blocked"
+            gh pr comment "$PR_NUM" --body "$COMMENT"
+          else
+            echo "PR title is valid."
+            gh pr edit "$PR_NUM" --remove-label "blocked" || true
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ steps.fetch_pr.outputs.title }}
+          COMMENT: >
+            The pull request title must be "Add $FLATPAK_ID" where
+            `$FLATPAK_ID` is the `app-id` of the submission. This PR
+            will be marked as blocked until it is fixed.
+
+      - name: Check PR checklist
+        run: |
+          unchecked=$(printf "%s\n" "$PR_BODY" | grep -Ec '^- \[ \] [A-Za-z]+' || true)
+
+          echo "Found unchecked items: $unchecked"
+
+          if [ "$unchecked" -gt 0 ]; then
+            echo "Checklist incomplete. Adding 'blocked' label and posting comment."
+
+            gh pr edit "$PR_NUM" --add-label "blocked"
+            gh pr comment "$PR_NUM" --body "$COMMENT"
+          else
+            echo "Checklist complete. Updating labels."
+
+            gh pr edit "$PR_NUM" --add-label "awaiting-review" --remove-label "blocked" || true
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+          PR_BODY: ${{ steps.fetch_pr.outputs.body }}
+          COMMENT: >
+            Some of the checklist items in the Pull Request body are
+            incomplete. This PR will be marked as blocked until all they
+            are completed.
